@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 
@@ -36,18 +37,35 @@ const (
 	RouteChatCompletions Route = "chat-completions"
 	RouteMessages        Route = "messages"
 	RouteResponses       Route = "responses"
+	RouteGemini          Route = "gemini"
 )
 
 // EndpointPath returns the upstream endpoint path for the route (FR-004).
-// routeEndpoints maps each route to its upstream endpoint path.
+// routeEndpoints maps each route to its upstream endpoint path; RouteGemini
+// has NO static endpoint — its paths are model-specific
+// (…/models/<model>:generateContent) and are stamped per record in swap.
 var routeEndpoints = map[Route]string{
 	RouteChatCompletions: "/v1/chat/completions",
 	RouteMessages:        "/v1/messages",
 	RouteResponses:       "/v1/responses",
 }
 
+// geminiActionSuffixes are the model-dependent Gemini endpoint actions.
+const (
+	geminiGenerateSuffix = ":generateContent"
+	geminiStreamSuffix   = ":streamGenerateContent?alt=sse"
+)
+
+// GeminiEndpointPath returns the non-streaming Gemini upstream endpoint
+// path for one model id: /v1/models/<id>:generateContent. The leading
+// /v1 segment is dropped by JoinUpstreamURL exactly like the static
+// routes, so the configured base-url's version segment is never doubled.
+func GeminiEndpointPath(modelID string) string {
+	return "/v1/models/" + modelID + geminiGenerateSuffix
+}
+
 // EndpointPath returns the route's upstream endpoint path, or "" for
-// unknown routes.
+// routes without one (RouteGemini).
 func (r Route) EndpointPath() string {
 	return routeEndpoints[r]
 }
@@ -129,6 +147,7 @@ var prefixRoutes = []struct {
 	{"kimi", RouteChatCompletions},
 	{"qwen", RouteMessages},
 	{"glm", RouteChatCompletions},
+	{"gemini", RouteGemini},
 	{"mimo", RouteChatCompletions},
 	{"hy", RouteChatCompletions},
 }
@@ -271,31 +290,56 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			unsup = append(unsup, UnsupportedModel{UpstreamID: e.ID, Reason: "no route determined"})
 			continue
 		}
+		// Model-name mapping: an alias publishes under its own ID but
+		// executes against the mapped upstream ID. Unless the alias has an
+		// explicit route override (which always wins), the route re-resolves
+		// from the mapped ID so "my-model" -> "glm-5.2" lands on the glm
+		// family's protocol even though the alias matches no prefix.
+		upstreamID := e.ID
+		mapped := config.MapUpstreamID(m.cfg, e.ID)
+		if mapped != e.ID {
+			upstreamID = mapped
+			if o, hasOverride := m.cfg.RouteOverrides[e.ID]; hasOverride {
+				route, endpoint = Route(o.Protocol), o.Endpoint
+				warn = fmt.Sprintf("model %q routed via user override (%s %s)", e.ID, o.Protocol, o.Endpoint)
+			} else if tRoute, tEndpoint, tok, twarn := m.resolve(rawModel{ID: mapped}); tok {
+				route, endpoint, warn = tRoute, tEndpoint, twarn
+			}
+		}
 		if !m.protocolEnabled(route) {
 			// Flags apply at snapshot build; a stale snapshot kept per
 			// FR-002 reflects the flags it was built with until the next
-			// successful refresh.
+			// successful refresh. Checked AFTER mapping so a redirected
+			// alias demotes with its TARGET's protocol.
 			unsup = append(unsup, UnsupportedModel{
 				UpstreamID: e.ID,
 				Reason:     fmt.Sprintf("protocol %s disabled by config", route),
 			})
 			continue
 		}
-		if endpoint != "" && endpointEscapesBase(m.cfg.BaseURL, endpoint) {
+		// The Gemini route has no static endpoint: its path embeds the
+		// upstream model id (…/models/<id>:generateContent), stamped against
+		// the final upstream ID so aliases execute on the target's endpoint.
+		// User overrides keep their own endpoint verbatim.
+		if endpoint == "" {
+			if route == RouteGemini {
+				endpoint = GeminiEndpointPath(upstreamID)
+			} else {
+				endpoint = route.EndpointPath()
+			}
+		}
+		if endpointEscapesBase(m.cfg.BaseURL, endpoint) {
 			// The joined URL must stay on the configured upstream
-			// authority. Override endpoints flow through here, so they
-			// cannot rewrite the URL host — e.g. "/v1@evil.com/x"
-			// against a bare-host base-url turns the base into userinfo
-			// and would send credentials/prompts to an attacker host
-			// (spec 05 §2 trust boundary).
+			// authority. Override endpoints and the generated Gemini paths
+			// flow through here, so neither can rewrite the URL host —
+			// e.g. "/v1@evil.com/x" against a bare-host base-url turns the
+			// base into userinfo and would send credentials/prompts to an
+			// attacker host (spec 05 §2 trust boundary).
 			unsup = append(unsup, UnsupportedModel{
 				UpstreamID: e.ID,
 				Reason:     "resolved endpoint escapes the configured upstream host",
 			})
 			continue
-		}
-		if endpoint == "" {
-			endpoint = route.EndpointPath()
 		}
 		inputModes := firstNonEmpty(e.InputModes, e.InputModalities)
 		outputModes := firstNonEmpty(e.OutputModes, e.OutputModalities)
@@ -305,7 +349,7 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 		}
 		rec := ModelRecord{
 			PublicID:     config.PublicID(m.cfg, e.ID),
-			UpstreamID:   e.ID,
+			UpstreamID:   upstreamID,
 			DisplayName:  display,
 			Protocol:     route,
 			EndpointPath: endpoint,
@@ -339,6 +383,97 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 		index[rec.PublicID] = rec
 		index[rec.UpstreamID] = rec
 	}
+
+	// Pass 2 — mapping-only aliases: a model-mappings entry whose key was
+	// never seen in the catalog registers a SYNTHETIC model. The alias is
+	// the only client-facing name (unless the target was independently
+	// discovered), and its route resolves from the mapped target on the
+	// same precedence ladder (override > family prefix > unroutable), so
+	// off-catalog models - e.g. an upstream that stops listing a family -
+	// stay configurable purely through model-mappings. Sorted keys keep
+	// the snapshot deterministic (map iteration is not).
+	aliases := make([]string, 0, len(m.cfg.ModelMappings))
+	for a := range m.cfg.ModelMappings {
+		if !seen[a] {
+			aliases = append(aliases, a)
+		}
+	}
+	sort.Strings(aliases)
+	for _, alias := range aliases {
+		target := m.cfg.ModelMappings[alias].To
+		var route Route
+		var endpoint string
+		var ok bool
+		var warn string
+		if o, hasOverride := m.cfg.RouteOverrides[alias]; hasOverride {
+			// The alias's own override outranks the target's family route,
+			// matching the pass-1 precedence.
+			route, endpoint, ok, warn = Route(o.Protocol), o.Endpoint, true,
+				fmt.Sprintf("mapped model %q routed via user override (%s %s)", alias, o.Protocol, o.Endpoint)
+		} else {
+			route, endpoint, ok, warn = m.resolve(rawModel{ID: target})
+		}
+		if ok {
+			if warn != "" {
+				warns = append(warns, fmt.Sprintf("mapped model %q: %s", alias, warn))
+			}
+			if !m.protocolEnabled(route) {
+				unsup = append(unsup, UnsupportedModel{
+					UpstreamID: alias,
+					Reason:     fmt.Sprintf("protocol %s disabled by config", route),
+				})
+				continue
+			}
+			if endpoint == "" {
+				if route == RouteGemini {
+					endpoint = GeminiEndpointPath(target)
+				} else {
+					endpoint = route.EndpointPath()
+				}
+			}
+			if endpointEscapesBase(m.cfg.BaseURL, endpoint) {
+				unsup = append(unsup, UnsupportedModel{
+					UpstreamID: alias,
+					Reason:     "resolved endpoint escapes the configured upstream host",
+				})
+				continue
+			}
+			rec := ModelRecord{
+				PublicID:     config.PublicID(m.cfg, alias),
+				UpstreamID:   target,
+				DisplayName:  alias,
+				Protocol:     route,
+				EndpointPath: endpoint,
+			}
+			// The alias takes BOTH its client-facing keys (prefixed public
+			// id and bare alias); the mapped target itself gains no new
+			// index key — with no catalog entry behind it, the target name
+			// only resolves through its alias.
+			planted := false
+			for _, key := range []string{rec.PublicID, alias} {
+				if other, exists := index[key]; exists && other.UpstreamID != rec.UpstreamID {
+					reason := fmt.Sprintf("mapped model %q: client id %q already resolves to %q", alias, key, other.PublicID)
+					warns = append(warns, reason)
+					unsup = append(unsup, UnsupportedModel{UpstreamID: alias, Reason: reason})
+					planted = true
+					break
+				}
+			}
+			if planted {
+				continue
+			}
+			models = append(models, rec)
+			index[rec.PublicID] = rec
+			if alias != rec.PublicID {
+				index[alias] = rec
+			}
+			continue
+		}
+		reason := fmt.Sprintf("mapped model %q: target %q has no route determined", alias, target)
+		warns = append(warns, reason)
+		unsup = append(unsup, UnsupportedModel{UpstreamID: alias, Reason: reason})
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.raw, m.models, m.index, m.unsup, m.warns = entries, models, index, unsup, warns
@@ -354,6 +489,8 @@ func (m *Manager) protocolEnabled(r Route) bool {
 		return m.cfg.Protocols.Messages
 	case RouteResponses:
 		return m.cfg.Protocols.Responses
+	case RouteGemini:
+		return m.cfg.Protocols.Gemini
 	}
 	return true
 }

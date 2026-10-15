@@ -40,11 +40,38 @@ type Protocols struct {
 	ChatCompletions bool
 	Messages        bool
 	Responses       bool
+	Gemini          bool
 }
 
 type RouteOverride struct {
 	Protocol string `yaml:"protocol"`
 	Endpoint string `yaml:"endpoint"`
+}
+
+// ModelMapping redirects one client-facing model ID to a different
+// upstream model ID. Both sides are bare model IDs; the mapping applies
+// before route resolution so "my-glm" publishes as "<prefix>/my-glm"
+// while executing against the upstream "glm-5.2" and that model's route.
+// The YAML value accepts either the object form (`to: <id>`) or the bare
+// scalar shorthand (`<mapping>: <id>`).
+type ModelMapping struct {
+	To string `yaml:"to"`
+}
+
+// UnmarshalYAML accepts a scalar target or the object form.
+func (m *ModelMapping) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		m.To = node.Value
+		return nil
+	}
+	var raw struct {
+		To string `yaml:"to"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	m.To = raw.To
+	return nil
 }
 
 type Config struct {
@@ -55,6 +82,7 @@ type Config struct {
 	Catalog          Catalog
 	Protocols        Protocols
 	RouteOverrides   map[string]RouteOverride
+	ModelMappings    map[string]ModelMapping
 	AllowHTTP        bool
 	RequestTimeout   time.Duration
 	MaxResponseBytes int64
@@ -71,6 +99,7 @@ type rawConfig struct {
 	Catalog          rawCatalog               `yaml:"catalog"`
 	Protocols        rawProtocols             `yaml:"protocols"`
 	RouteOverrides   map[string]RouteOverride `yaml:"route-overrides"`
+	ModelMappings    map[string]ModelMapping  `yaml:"model-mappings"`
 	AllowHTTP        bool                     `yaml:"allow-http"`
 	RequestTimeout   *string                  `yaml:"request-timeout"`
 	MaxResponseBytes *int64                   `yaml:"max-response-bytes"`
@@ -94,10 +123,11 @@ type rawProtocols struct {
 	ChatCompletions *bool `yaml:"chat-completions"`
 	Messages        *bool `yaml:"messages"`
 	Responses       *bool `yaml:"responses"`
+	Gemini          *bool `yaml:"gemini"`
 }
 
 var (
-	validProtocols = map[string]bool{"chat-completions": true, "messages": true, "responses": true}
+	validProtocols = map[string]bool{"chat-completions": true, "messages": true, "responses": true, "gemini": true}
 )
 
 // Load decodes YAML, expands ${VAR} references in api-key values only,
@@ -142,8 +172,10 @@ func Load(yamlBytes []byte) (Config, error) {
 			ChatCompletions: orDefault(raw.Protocols.ChatCompletions, true),
 			Messages:        orDefault(raw.Protocols.Messages, true),
 			Responses:       orDefault(raw.Protocols.Responses, true),
+			Gemini:          orDefault(raw.Protocols.Gemini, true),
 		},
 		RouteOverrides:   raw.RouteOverrides,
+		ModelMappings:    raw.ModelMappings,
 		AllowHTTP:        raw.AllowHTTP,
 		RequestTimeout:   requestTimeout,
 		MaxResponseBytes: orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
@@ -154,6 +186,10 @@ func Load(yamlBytes []byte) (Config, error) {
 		c.CatalogURL = strings.TrimRight(*raw.CatalogURL, "/")
 	} else {
 		c.CatalogURL = strings.TrimRight(c.BaseURL, "/") + "/models"
+	}
+	for name, m := range c.ModelMappings {
+		m.To = strings.TrimSpace(m.To)
+		c.ModelMappings[name] = m
 	}
 	if err := c.validate(); err != nil {
 		return Config{}, err
@@ -167,6 +203,17 @@ func PublicID(c Config, upstreamID string) string {
 		return c.ModelPrefix.Value + "/" + upstreamID
 	}
 	return upstreamID
+}
+
+// MapUpstreamID resolves the upstream model ID a client-visible ID
+// executes against: a model-mappings entry redirects the ID, anything
+// else maps to itself. Chained mappings are rejected at load, so one
+// lookup step is always final.
+func MapUpstreamID(c Config, id string) string {
+	if m, ok := c.ModelMappings[id]; ok {
+		return m.To
+	}
+	return id
 }
 
 func (c Config) validate() error {
@@ -207,6 +254,17 @@ func (c Config) validate() error {
 		if !strings.HasPrefix(o.Endpoint, "/") {
 			return fmt.Errorf("route-overrides[%s].endpoint: must start with /", name)
 		}
+	}
+	for name, m := range c.ModelMappings {
+		if strings.TrimSpace(m.To) == "" {
+			return fmt.Errorf("model-mappings[%s].to: must not be empty", name)
+		}
+		if strings.TrimSpace(m.To) == name {
+			return fmt.Errorf("model-mappings[%s].to: must differ from the mapped id", name)
+		}
+	}
+	if _, chain := chainedMapping(c.ModelMappings); chain {
+		return fmt.Errorf("model-mappings: chained mappings are not supported; map the alias directly to the upstream model id")
 	}
 	if c.ModelPrefix.Enabled && !validPrefix(c.ModelPrefix.Value) {
 		return fmt.Errorf("model-prefix.value: invalid provider-ID characters %q", c.ModelPrefix.Value)
@@ -277,4 +335,16 @@ func orDefault[T any](p *T, def T) T {
 		return *p
 	}
 	return def
+}
+
+// chainedMapping checks for a mapping target that is itself a mapping
+// key. All values were already trimmed by validate; chained redirection
+// would make alias resolution order-dependent, so it is rejected.
+func chainedMapping(m map[string]ModelMapping) (string, bool) {
+	for from, mm := range m {
+		if _, ok := m[mm.To]; ok {
+			return from, true
+		}
+	}
+	return "", false
 }

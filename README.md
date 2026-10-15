@@ -6,7 +6,7 @@ The plugin unifies model discovery, protocol translation, and execution across O
 
 ## The Problem
 
-OpenCode Go exposes models across multiple API protocols (OpenAI Chat Completions `/v1/chat/completions`, Anthropic Messages `/v1/messages`, and OpenAI Responses `/v1/responses`).
+OpenCode Go exposes models across multiple API protocols (OpenAI Chat Completions `/v1/chat/completions`, Anthropic Messages `/v1/messages`, OpenAI Responses `/v1/responses`, and Gemini `generateContent`).
 
 Without this plugin, using OpenCode Go in CLIProxyAPI requires configuring separate provider blocks for each protocol family. This leads to:
 - **Duplicated configuration & keys**: The same API keys must be configured across multiple provider blocks.
@@ -28,7 +28,9 @@ This plugin exposes OpenCode Go as a single provider (`opencode-go`) backed by a
   - OpenAI Chat Completions (`/v1/chat/completions`)
   - Anthropic Messages (`/v1/messages`)
   - OpenAI Responses (`/v1/responses`)
-- **Thinking & Reasoning Support**: Maps reasoning effort across supported client and upstream formats.
+  - Gemini generateContent (`/v1/models/<model>:generateContent` + `:streamGenerateContent?alt=sse`)
+- **Thinking & Reasoning Support**: Maps reasoning effort across supported client and upstream formats (reasoning controls map to Gemini `generationConfig.thinkingConfig.thinkingBudget` on the gemini route).
+- **Model Name Mapping**: Publish client-facing aliases that execute against any upstream model — including off-catalog models registered purely through mappings.
 - **Dynamic Catalog Discovery**: Fetches remote model catalogs with local fallback and custom route overrides.
 - **Multi-Key Auth Scheduling**: Pools multiple API keys with CLIProxyAPI's native scheduler for rotation, retries, and error cooldowns across all protocols.
 - **OpenCode Go Quota Page**: Management Center includes a separate `OpenCode Go Quota` page. Page load lists credentials without contacting OpenCode; each card is refreshed manually and independently, and quota values do not affect routing or CPA's native quota page.
@@ -94,12 +96,24 @@ plugins:
         chat-completions: true   # enables models routed to /v1/chat/completions
         messages: true           # enables models routed to /v1/messages
         responses: true          # enables models routed to /v1/responses
+        gemini: true             # enables models routed to gemini generateContent
 
       # Explicit route overrides per model (takes priority over built-in prefix routing)
       route-overrides:
         "custom-model":
-          protocol: "messages"           # "chat-completions" | "messages" | "responses"
+          protocol: "messages"           # "chat-completions" | "messages" | "responses" | "gemini"
           endpoint: "/v1/messages"       # must start with /
+
+      # Model name mappings: a client-facing alias executes against a
+      # different upstream model. The object form (`to: ...`) and the bare
+      # scalar shorthand are both accepted. Aliases inherit the mapped
+      # target's route; a mapping key absent from the catalog registers a
+      # SYNTHETIC model resolved from the target's family prefix.
+      model-mappings:
+        "my-glm":
+          to: "glm-5.2"          # publishes opencode-go/my-glm, executes on glm-5.2
+        "legacy-qwen": "qwen3.7-max"   # shorthand form
+        "my-fast-gemini": "gemini-4-argon-contributor"
 
       # Execution settings
       request-timeout: "5m"              # upstream request timeout (default: "5m")
@@ -121,7 +135,9 @@ plugins:
 | `protocols.chat-completions` | `bool` | `true` | Protocol switch for Chat Completions endpoints. |
 | `protocols.messages` | `bool` | `true` | Protocol switch for Messages endpoints. |
 | `protocols.responses` | `bool` | `true` | Protocol switch for Responses endpoints. |
-| `route-overrides` | `map` | `{}` | Map of model ID to `{ protocol: "...", endpoint: "..." }` overriding built-in family routing. Valid protocols: `chat-completions`, `messages`, `responses`. |
+| `protocols.gemini` | `bool` | `true` | Protocol switch for Gemini generateContent endpoints. |
+| `route-overrides` | `map` | `{}` | Map of model ID to `{ protocol: "...", endpoint: "..." }` overriding built-in family routing. Valid protocols: `chat-completions`, `messages`, `responses`, `gemini`. |
+| `model-mappings` | `map` | `{}` | Map of client-facing model ID to `{ to: <upstream-model-id> }` (or a bare scalar). The alias inherits the target's route; targets absent from the catalog register synthetic models with no capability metadata. Empty targets, self-mappings, and chained mappings are rejected at load. |
 | `request-timeout` | `duration` | `5m` | Upstream HTTP request timeout. Must be positive. |
 | `max-response-bytes` | `int64` | `67108864` (64 MiB) | Maximum non-streaming response body size in bytes. |
 | `allow-http` | `bool` | `false` | When `true`, permits `http://` scheme in `base-url` / `catalog-url` for local testing. |
@@ -138,3 +154,15 @@ go test ./... -cover
 # Run linter / vetting
 go vet ./...
 ```
+
+## Gemini route notes
+
+- Gemini models are discovered by the `gemini` family prefix and routed to
+  model-specific endpoints (`/v1/models/<model>:generateContent`); streaming
+  swaps the action to `:streamGenerateContent?alt=sse` automatically.
+- Gemini thought parts (streaming `thought:true` deltas and thinking
+  summaries) are omitted on translated routes per the plugin's explicit
+  omission policy; reasoning controls map to `thinkingConfig.thinkingBudget`.
+- The Gemini wire carries no tool-call ids and no `[DONE]` sentinel: the
+  adapter synthesizes ids (`<name>#<index>`) for client history round-trips
+  and terminates client streams at upstream close.

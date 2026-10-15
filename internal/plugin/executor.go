@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
 	"opencode-go-cliproxyapi/internal/adapter/chatcompletions"
+	"opencode-go-cliproxyapi/internal/adapter/gemini"
 	"opencode-go-cliproxyapi/internal/adapter/messages"
 	"opencode-go-cliproxyapi/internal/adapter/responses"
 	"opencode-go-cliproxyapi/internal/adapter/shared"
@@ -103,7 +104,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 		return classEnvelope(eErr), nil
 	}
 
-	url := catalog.JoinUpstreamURL(res.cfg.BaseURL, res.rec.EndpointPath)
+	url := upstreamURL(res.cfg.BaseURL, res.rec, false)
 	debugTrace("executor resolved public_model=%s upstream_model=%s route=%s url=%s key_count=%d", req.Model, res.rec.UpstreamID, res.rec.Protocol, url, len(res.cfg.APIKeys))
 	debugTrace("executor sending non-stream url=%s body_len=%d", url, len(upstreamBody))
 	ctx, cancel := context.WithTimeout(context.Background(), res.cfg.RequestTimeout)
@@ -141,15 +142,33 @@ func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat strin
 		return messages.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts, tools...)
 	case catalog.RouteResponses:
 		return responses.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts, tools...)
+	case catalog.RouteGemini:
+		return gemini.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts, tools...)
 	}
 	return nil, errclass.Translation("unsupported route")
 }
 
+// upstreamURL joins the base URL onto the record's endpoint; the Gemini
+// route additionally swaps in the streaming action
+// (:streamGenerateContent?alt=sse), which the same record's non-streaming
+// endpoint (:generateContent) cannot express.
+func upstreamURL(baseURL string, rec catalog.ModelRecord, stream bool) string {
+	if stream && rec.Protocol == catalog.RouteGemini && !strings.Contains(rec.EndpointPath, "streamGenerateContent") {
+		if model, ok := gemini.UpstreamPath(rec.EndpointPath); ok {
+			rec.EndpointPath = gemini.GeminiStreamEndpointPath(model)
+		}
+	}
+	return catalog.JoinUpstreamURL(baseURL, rec.EndpointPath)
+}
+
 func upstreamAuthHeaders(route catalog.Route, key, sessionID string) http.Header {
 	var h http.Header
-	if route == catalog.RouteMessages {
+	switch route {
+	case catalog.RouteMessages:
 		h = messages.AuthHeaders(key)
-	} else {
+	case catalog.RouteGemini:
+		h = gemini.AuthHeaders(key)
+	default:
 		// Chat Completions and Responses endpoints are OpenAI-style bearer.
 		h = chatcompletions.AuthHeaders(key)
 	}
@@ -299,6 +318,8 @@ func convertNonStream(route catalog.Route, sourceFormat string, status int, body
 		return messages.ConvertNonStreamResponse(sourceFormat, status, body, tools...)
 	case catalog.RouteResponses:
 		return responses.ConvertNonStreamResponse(sourceFormat, status, body, tools...)
+	case catalog.RouteGemini:
+		return gemini.ConvertNonStreamResponse(sourceFormat, status, body, tools...)
 	}
 	return nil, errclass.Translation("unsupported route")
 }
@@ -318,10 +339,11 @@ type streamConverter interface {
 }
 
 // Compile-time proof the close-without-terminal Flush seam (F5) picks up
-// both converters that can hold a deferred terminal.
+// every converter that can hold a deferred terminal.
 var (
 	_ interface{ Flush() [][]byte } = (*chatcompletions.StreamConverter)(nil)
 	_ interface{ Flush() [][]byte } = (*messages.StreamConverter)(nil)
+	_ interface{ Flush() [][]byte } = (*gemini.StreamConverter)(nil)
 )
 
 func newStreamConverter(route catalog.Route, sourceFormat string, tools ...*shared.ResponseTools) streamConverter {
@@ -330,6 +352,8 @@ func newStreamConverter(route catalog.Route, sourceFormat string, tools ...*shar
 		return messages.NewStreamConverter(sourceFormat, tools...)
 	case catalog.RouteResponses:
 		return responses.NewStreamConverter(sourceFormat, tools...)
+	case catalog.RouteGemini:
+		return gemini.NewStreamConverter(sourceFormat, tools...)
 	}
 	return chatcompletions.NewStreamConverter(sourceFormat, tools...)
 }
@@ -367,7 +391,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		return classEnvelope(eErr), nil
 	}
 
-	url := catalog.JoinUpstreamURL(res.cfg.BaseURL, res.rec.EndpointPath)
+	url := upstreamURL(res.cfg.BaseURL, res.rec, true)
 	debugTrace("executor sending stream url=%s body_len=%d", url, len(upstreamBody))
 	ctx, cancel := context.WithTimeout(context.Background(), res.cfg.RequestTimeout)
 	defer cancel()

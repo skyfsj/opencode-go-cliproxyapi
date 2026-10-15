@@ -44,7 +44,7 @@ func testCfg() config.Config {
 		ModelPrefix:      config.ModelPrefix{Enabled: true, Value: "opencode-go"},
 		MaxResponseBytes: 1 << 20,
 		Catalog:          config.Catalog{StaleWhileUnavailable: true},
-		Protocols:        config.Protocols{ChatCompletions: true, Messages: true, Responses: true},
+		Protocols:        config.Protocols{ChatCompletions: true, Messages: true, Responses: true, Gemini: true},
 	}
 }
 
@@ -1113,5 +1113,178 @@ func TestRefreshDataKeyAbsentVsEmpty(t *testing.T) {
 	}
 	if got := m.Warnings(); len(got) != 0 {
 		t.Fatalf("intended clear must stay silent, got %v", got)
+	}
+}
+
+// ---- gemini route + model-mappings (plugin extension) ----
+
+// TestGeminiRouteAndEndpoint pins gemini-family models on the Gemini route
+// with a MODEL-SPECIFIC endpoint (…/models/<id>:generateContent).
+func TestGeminiRouteAndEndpoint(t *testing.T) {
+	body := `{"data":[{"id":"gemini-4-argon-contributor"},{"id":"gemini-9-flash"}]}`
+	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}}
+	m := newManager(testCfg(), fc)
+	mustRefresh(t, m)
+
+	for _, id := range []string{"gemini-4-argon-contributor", "gemini-9-flash"} {
+		rec := findModel(t, m.Models(), id)
+		if rec.Protocol != RouteGemini {
+			t.Errorf("%s: Protocol = %q, want gemini", id, rec.Protocol)
+		}
+		want := "/v1/models/" + id + ":generateContent"
+		if rec.EndpointPath != want {
+			t.Errorf("%s: EndpointPath = %q, want %q", id, rec.EndpointPath, want)
+		}
+	}
+	if got := GeminiEndpointPath("gemini-x"); got != "/v1/models/gemini-x:generateContent" {
+		t.Errorf("GeminiEndpointPath = %q", got)
+	}
+}
+
+// TestGeminiProtocolFlagDemotes pins the gemini kill-switch: disabled,
+// gemini-family models land in Unsupported with the standard demotion
+// reason.
+func TestGeminiProtocolFlagDemotes(t *testing.T) {
+	body := `{"data":[{"id":"gemini-4-argon-contributor"},{"id":"glm-5.2"}]}`
+	cfg := testCfg()
+	cfg.Protocols.Gemini = false
+	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}}
+	m := newManager(cfg, fc)
+	mustRefresh(t, m)
+
+	findModel(t, m.Models(), "glm-5.2") // unaffected route keeps serving
+	if _, ok := m.Lookup("gemini-4-argon-contributor"); ok {
+		t.Fatal("disabled-protocol gemini model must not resolve")
+	}
+	found := false
+	for _, u := range m.Unsupported() {
+		if u.UpstreamID == "gemini-4-argon-contributor" && u.Reason == "protocol gemini disabled by config" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unsupported = %+v, want gemini demotion diagnostic", m.Unsupported())
+	}
+}
+
+// TestMappingRedirectsDiscoveredModel pins pass-1 aliasing: an alias to a
+// discovered model publishes under its own public id, executes against the
+// mapped upstream id, and inherits the mapped family's route.
+func TestMappingRedirectsDiscoveredModel(t *testing.T) {
+	body := `{"data":[{"id":"glm-5.2"}]}`
+	cfg := testCfg()
+	cfg.ModelMappings = map[string]config.ModelMapping{"my-glm": {To: "glm-5.2"}}
+	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}}
+	m := newManager(cfg, fc)
+	mustRefresh(t, m)
+
+	rec, ok := m.Lookup("opencode-go/my-glm")
+	if !ok {
+		t.Fatalf("alias public id missing; models = %+v", m.Models())
+	}
+	if rec.UpstreamID != "glm-5.2" {
+		t.Errorf("alias UpstreamID = %q, want glm-5.2", rec.UpstreamID)
+	}
+	if rec.Protocol != RouteChatCompletions {
+		t.Errorf("alias Protocol = %q, want the glm family's chat-completions", rec.Protocol)
+	}
+	if rec.EndpointPath != "/v1/chat/completions" {
+		t.Errorf("alias EndpointPath = %q", rec.EndpointPath)
+	}
+	if rec.PublicID != "opencode-go/my-glm" {
+		t.Errorf("alias PublicID = %q", rec.PublicID)
+	}
+	// The mapped target itself stays independently addressable.
+	findModel(t, m.Models(), "glm-5.2")
+}
+
+// TestMappingOverridesAliasRoute pins the precedence ladder: an explicit
+// route override on the ALIAS beats the mapped target's family route.
+func TestMappingOverridesAliasRoute(t *testing.T) {
+	body := `{"data":[{"id":"glm-5.2"}]}`
+	cfg := testCfg()
+	cfg.ModelMappings = map[string]config.ModelMapping{"my-glm": {To: "glm-5.2"}}
+	cfg.RouteOverrides = map[string]config.RouteOverride{
+		"my-glm": {Protocol: "responses", Endpoint: "/v1/responses"},
+	}
+	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}}
+	m := newManager(cfg, fc)
+	mustRefresh(t, m)
+
+	rec, ok := m.Lookup("opencode-go/my-glm")
+	if !ok {
+		t.Fatalf("alias missing; models = %+v", m.Models())
+	}
+	if rec.Protocol != RouteResponses || rec.EndpointPath != "/v1/responses" {
+		t.Errorf("override not applied to alias: %+v", rec)
+	}
+}
+
+// TestMappingOffCatalogAliasRegistersSynthetic pins pass-2: a mapping whose
+// key never appears upstream registers a synthetic model resolved from the
+// TARGET's family, with the target executing through the alias only.
+func TestMappingOffCatalogAliasRegistersSynthetic(t *testing.T) {
+	body := `{"data":[{"id":"glm-5.2"}]}`
+	cfg := testCfg()
+	cfg.ModelMappings = map[string]config.ModelMapping{
+		"legacy-sonnet": {To: "claude-sonnet-4-6"},
+	}
+	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}}
+	m := newManager(cfg, fc)
+	mustRefresh(t, m)
+
+	// "claude-sonnet-4-6" has no family prefix and no catalog entry: the
+	// alias is unroutable and diagnosed, never silently dropped.
+	found := false
+	for _, u := range m.Unsupported() {
+		if u.UpstreamID == "legacy-sonnet" && strings.Contains(u.Reason, "no route determined") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unsupported = %+v, want legacy-sonnet unroutable diagnostic", m.Unsupported())
+	}
+
+	// A prefix-matching target routes and registers: qwen family.
+	cfg2 := testCfg()
+	cfg2.ModelMappings = map[string]config.ModelMapping{"legacy-qwen": {To: "qwen3.8-max"}}
+	fc2 := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}}
+	m2 := newManager(cfg2, fc2)
+	mustRefresh(t, m2)
+	rec, ok := m2.Lookup("opencode-go/legacy-qwen")
+	if !ok {
+		t.Fatalf("synthetic alias missing; models = %+v", m2.Models())
+	}
+	if rec.Protocol != RouteMessages || rec.UpstreamID != "qwen3.8-max" {
+		t.Errorf("synthetic alias record = %+v", rec)
+	}
+	if rec.EndpointPath != "/v1/messages" {
+		t.Errorf("synthetic alias EndpointPath = %q", rec.EndpointPath)
+	}
+	// The target name itself gains no index key (no catalog entry behind it).
+	if _, ok := m2.Lookup("qwen3.8-max"); ok {
+		t.Error("off-catalog target must not resolve through the alias's upstream key")
+	}
+}
+
+// TestMappingOffCatalogGeminiAlias pins the synthetic-alias endpoint
+// generation for the gemini family: the path embeds the TARGET id.
+func TestMappingOffCatalogGeminiAlias(t *testing.T) {
+	body := `{"data":[]}`
+	cfg := testCfg()
+	cfg.ModelMappings = map[string]config.ModelMapping{"my-gem": {To: "gemini-4-pro"}}
+	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}}
+	m := newManager(cfg, fc)
+	mustRefresh(t, m)
+
+	rec, ok := m.Lookup("opencode-go/my-gem")
+	if !ok {
+		t.Fatalf("synthetic gemini alias missing; models = %+v", m.Models())
+	}
+	if rec.Protocol != RouteGemini || rec.UpstreamID != "gemini-4-pro" {
+		t.Fatalf("synthetic record = %+v", rec)
+	}
+	if rec.EndpointPath != "/v1/models/gemini-4-pro:generateContent" {
+		t.Errorf("synthetic EndpointPath = %q", rec.EndpointPath)
 	}
 }

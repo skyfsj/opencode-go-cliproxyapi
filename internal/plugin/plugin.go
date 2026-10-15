@@ -24,7 +24,7 @@ const ProviderID = "opencode-go"
 // pluginName / pluginVersion are reported in registration metadata.
 const (
 	pluginName    = "opencode-go-cliproxyapi"
-	pluginVersion = "0.1.10"
+	pluginVersion = "0.2.0"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
@@ -198,12 +198,17 @@ func pluginConfigFields() []pluginapi.ConfigField {
 		{
 			Name:        "protocols",
 			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Protocol enable/disable switches (`chat-completions: bool`, `messages: bool`, `responses: bool`).",
+			Description: "Protocol enable/disable switches (`chat-completions: bool`, `messages: bool`, `responses: bool`, `gemini: bool`).",
 		},
 		{
 			Name:        "route-overrides",
 			Type:        pluginapi.ConfigFieldTypeObject,
 			Description: "Explicit route overrides per model (`<model-id>: {protocol: string, endpoint: string}`).",
+		},
+		{
+			Name:        "model-mappings",
+			Type:        pluginapi.ConfigFieldTypeObject,
+			Description: "Model name mappings (`<client-model-id>: {to: <upstream-model-id>}`). Off-catalog aliases register synthetic models.",
 		},
 		{
 			Name:        "request-timeout",

@@ -336,3 +336,82 @@ func TestValidateURLRejectsQueryFragmentUserinfo(t *testing.T) {
 		})
 	}
 }
+
+// ---- gemini protocol switch + model-mappings (plugin extension) ----
+
+func TestGeminiProtocolDefaultsOn(t *testing.T) {
+	c, err := Load([]byte(withKey))
+	if err != nil {
+		t.Fatalf("Load(minimal): %v", err)
+	}
+	if !c.Protocols.Gemini {
+		t.Errorf("Protocols.Gemini = false, want default true")
+	}
+}
+
+func TestGeminiProtocolSwitch(t *testing.T) {
+	yaml := withKey + "protocols:\n  gemini: false\n"
+	c, err := Load([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Protocols.Gemini {
+		t.Errorf("Protocols.Gemini = true after explicit false")
+	}
+}
+
+func TestModelMappingsLoadAndValidate(t *testing.T) {
+	yaml := withKey + `
+model-mappings:
+  my-glm:
+    to: glm-5.2
+  alias-free: gpt-5.6-luna
+`
+	c, err := Load([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := MapUpstreamID(c, "my-glm"); got != "glm-5.2" {
+		t.Errorf("MapUpstreamID(my-glm) = %q, want glm-5.2", got)
+	}
+	if got := MapUpstreamID(c, "alias-free"); got != "gpt-5.6-luna" {
+		t.Errorf("MapUpstreamID(alias-free) = %q, want gpt-5.6-luna", got)
+	}
+	if got := MapUpstreamID(c, "glm-5.2"); got != "glm-5.2" {
+		t.Errorf("MapUpstreamID unmapped = %q, want identity", got)
+	}
+	// Values are trimmed at load.
+	if m := c.ModelMappings["my-glm"]; m.To != "glm-5.2" {
+		t.Errorf("trimmed To = %q", m.To)
+	}
+}
+
+func TestModelMappingsRejectInvalid(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name:    "empty target",
+			yaml:    withKey + "model-mappings:\n  alias:\n    to: \"\"\n",
+			wantErr: "model-mappings[alias].to: must not be empty",
+		},
+		{
+			name:    "self mapping",
+			yaml:    withKey + "model-mappings:\n  glm-5.2:\n    to: glm-5.2\n",
+			wantErr: "model-mappings[glm-5.2].to: must differ from the mapped id",
+		},
+		{
+			name:    "chained mapping",
+			yaml:    withKey + "model-mappings:\n  a:\n    to: b\n  b:\n    to: glm-5.2\n",
+			wantErr: "chained mappings are not supported",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load([]byte(tc.yaml))
+			requireErrContains(t, err, tc.wantErr)
+		})
+	}
+}

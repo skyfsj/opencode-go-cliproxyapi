@@ -1,6 +1,12 @@
 ## What's Changed
 
+### Gemini API Support and Model Name Mapping (v0.2.0)
+
+- Add the Gemini `generateContent` protocol as a fourth-routed family: gemini-family models (e.g. `gemini-4-argon-contributor`) now route to model-specific upstream endpoints (`/v1/models/<model>:generateContent`, streaming via `:streamGenerateContent?alt=sse`) with full request, non-stream response, and SSE stream translation across all client protocols (OpenAI Chat Completions, Anthropic Messages, OpenAI Responses). Reasoning controls map to `generationConfig.thinkingConfig.thinkingBudget`; thought parts are omitted on translated routes per the standard omission policy. Disable with `protocols.gemini: false`.
+- Add model name mappings (`model-mappings`): publish client-facing aliases that execute against any upstream model — aliases inherit the mapped target's route and precedence ladder (an explicit `route-overrides` entry on the alias always wins). Mapping keys absent from the catalog register synthetic models, so off-catalog upstream models stay configurable purely through mappings. Scalar (`alias: target`) and object (`alias: {to: target}`) YAML forms are both accepted; empty targets, self-mappings, and chained mappings are rejected at load with diagnostics for unroutable targets.
+
 Full OpenAI Codex CLI support across all models: multi-agent namespaces, custom programmatic tools (`exec`), tool call results, and reasoning efforts are fully functional.
+ across all models: multi-agent namespaces, custom programmatic tools (`exec`), tool call results, and reasoning efforts are fully functional.
 
 ### Bug Fixes
 
