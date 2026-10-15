@@ -317,14 +317,19 @@ func sanitizeSchemaNode(node map[string]any, refs map[string]map[string]any, dep
 			delete(node, "items")
 		}
 	}
-	if ap, ok := node["additionalProperties"].(map[string]any); ok {
-		// additionalProperties with a nested schema is JSON-Schema-only:
-		// keep a hint, drop the schema.
+	if ap, ok := node["additionalProperties"]; ok {
+		// This gateway's Schema proto does not accept additionalProperties
+		// in any form (bool or nested schema) — drop with a note.
 		delete(node, "additionalProperties")
-		notes = append(notes, "extra properties: "+describeSchema(ap))
-	} else if apb, ok := node["additionalProperties"].(bool); ok && !apb {
-		// false is representable and keeps the model from inventing keys.
-		node["additionalProperties"] = false
+		notes2 := ""
+		if apb, isBool := ap.(bool); isBool && apb {
+			notes2 = "unconstrained"
+		} else if apm, isMap := ap.(map[string]any); isMap {
+			notes2 = describeSchema(apm)
+		}
+		if notes2 != "" {
+			notes = append(notes, "extra properties: "+notes2)
+		}
 	}
 
 	// enum: proto type is array-of-string; coerce non-strings verbatim.

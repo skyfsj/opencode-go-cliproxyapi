@@ -103,9 +103,10 @@ func TestSanitizeZCodeLikeSchema(t *testing.T) {
 	if tree == nil || tree["type"] != "object" {
 		t.Errorf("tree = %v, want degraded object", tree)
 	}
-	// additionalProperties:false survives.
-	if san["additionalProperties"] != false {
-		t.Errorf("additionalProperties = %v", san["additionalProperties"])
+	// additionalProperties:false has no note-worthy content (dropped
+	// silently — false adds nothing the model needs).
+	if _, present := san["additionalProperties"]; present {
+		t.Errorf("additionalProperties must not survive: %v", san["additionalProperties"])
 	}
 }
 
