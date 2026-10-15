@@ -493,7 +493,6 @@ func TestFromResponsesRequest_FunctionCallOutputArray(t *testing.T) {
 	}
 }
 
-
 func TestResponsesReasoningOmittedWhenEmptySummary(t *testing.T) {
 	m, eErr := respReq(t, `{"input":[{"type":"reasoning","summary":[]}]}`)
 	if eErr != nil {

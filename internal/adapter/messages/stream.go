@@ -40,15 +40,15 @@ type StreamConverter struct {
 
 // blockState tracks one open upstream content block by index.
 type blockState struct {
-	kind    string
-	id      string
-	name    string
-	ordinal int             // compact tool_calls index for openai chunks
-	outIdx  int             // responses: compacted output_index assigned at block start
-	emitted bool            // openai: id/name attached to the first arguments fragment
-	text    strings.Builder // accumulated text_delta content (responses target)
-	args    strings.Builder // accumulated input_json_delta content (responses target)
-	customEmitted int // custom_tool_call_input bytes already emitted as deltas
+	kind          string
+	id            string
+	name          string
+	ordinal       int             // compact tool_calls index for openai chunks
+	outIdx        int             // responses: compacted output_index assigned at block start
+	emitted       bool            // openai: id/name attached to the first arguments fragment
+	text          strings.Builder // accumulated text_delta content (responses target)
+	args          strings.Builder // accumulated input_json_delta content (responses target)
+	customEmitted int             // custom_tool_call_input bytes already emitted as deltas
 }
 
 // NewStreamConverter prepares stream conversion for sourceFormat

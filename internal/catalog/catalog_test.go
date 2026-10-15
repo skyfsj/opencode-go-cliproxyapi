@@ -1288,3 +1288,56 @@ func TestMappingOffCatalogGeminiAlias(t *testing.T) {
 		t.Errorf("synthetic EndpointPath = %q", rec.EndpointPath)
 	}
 }
+
+// TestStripContributorSuffixSwitch pins the display-name normalization:
+// stripped PUBLIC id resolves and executes on the full upstream id; the
+// full upstream id keeps resolving through its upstream key; the switch
+// defaults off.
+func TestStripContributorSuffixSwitch(t *testing.T) {
+	body := `{"data":[{"id":"gemini-4-argon-contributor"},{"id":"muse-spark-1.2-contributor"}]}`
+
+	// Default off: unchanged behavior.
+	off := newManager(testCfg(), &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}})
+	mustRefresh(t, off)
+	findModel(t, off.Models(), "gemini-4-argon-contributor")
+	if _, ok := off.Lookup("opencode-go/gemini-4-argon"); ok {
+		t.Error("stripped name must NOT resolve while switch is off")
+	}
+
+	// On: publish stripped, execute full.
+	cfg := testCfg()
+	cfg.StripContributorSuffix = true
+	on := newManager(cfg, &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}})
+	mustRefresh(t, on)
+
+	gem := findModel(t, on.Models(), "gemini-4-argon-contributor")
+	if gem.PublicID != "opencode-go/gemini-4-argon" {
+		t.Errorf("PublicID = %q, want stripped", gem.PublicID)
+	}
+	if gem.DisplayName != "gemini-4-argon" {
+		t.Errorf("DisplayName = %q, want stripped", gem.DisplayName)
+	}
+	if gem.Protocol != RouteGemini || gem.EndpointPath != "/v1/models/gemini-4-argon-contributor:generateContent" {
+		t.Errorf("execution endpoints must keep the full upstream id: %+v", gem)
+	}
+	if rec, ok := on.Lookup("opencode-go/gemini-4-argon"); !ok || rec.UpstreamID != "gemini-4-argon-contributor" {
+		t.Errorf("stripped public lookup = %+v %v", rec, ok)
+	}
+	// The full upstream id remains resolvable through its upstream key.
+	if rec, ok := on.Lookup("gemini-4-argon-contributor"); ok && rec.UpstreamID != "gemini-4-argon-contributor" {
+		t.Errorf("full upstream id lookup = %+v", rec)
+	}
+	ms := findModel(t, on.Models(), "muse-spark-1.2-contributor")
+	if ms.PublicID != "opencode-go/muse-spark-1.2" {
+		t.Errorf("muse-spark PublicID = %q, want stripped", ms.PublicID)
+	}
+	found := false
+	for _, w := range on.Warnings() {
+		if strings.Contains(w, "contributor suffix stripped") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("stripping not diagnosed: %v", on.Warnings())
+	}
+}

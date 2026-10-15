@@ -415,3 +415,20 @@ func TestModelMappingsRejectInvalid(t *testing.T) {
 		})
 	}
 }
+
+func TestStripContributorSuffixDefaultOffAndSwitch(t *testing.T) {
+	c, err := Load([]byte(withKey))
+	if err != nil {
+		t.Fatalf("Load(minimal): %v", err)
+	}
+	if c.StripContributorSuffix {
+		t.Error("default on: strip-contributor-suffix should default to false")
+	}
+	on, err := Load([]byte(withKey + "strip-contributor-suffix: true\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !on.StripContributorSuffix {
+		t.Error("explicit true not honored")
+	}
+}

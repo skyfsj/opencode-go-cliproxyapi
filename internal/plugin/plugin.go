@@ -211,6 +211,11 @@ func pluginConfigFields() []pluginapi.ConfigField {
 			Description: "Model name mappings (`<client-model-id>: {to: <upstream-model-id>}`). Off-catalog aliases register synthetic models.",
 		},
 		{
+			Name:        "strip-contributor-suffix",
+			Type:        pluginapi.ConfigFieldTypeBoolean,
+			Description: "Strip the `-contributor` marker from client-facing model names (display only; upstream executions keep the full id; default false).",
+		},
+		{
 			Name:        "request-timeout",
 			Type:        pluginapi.ConfigFieldTypeString,
 			Description: "Upstream HTTP request timeout (default: 5m).",

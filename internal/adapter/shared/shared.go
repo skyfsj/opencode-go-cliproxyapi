@@ -479,7 +479,6 @@ func RespOutputText(raw json.RawMessage, targetNoun string) (string, *errclass.E
 	return b.String(), nil
 }
 
-
 // ClaudeImageURL converts an Anthropic image block source into an image
 // URL for OpenAI-style targets, encoding base64 sources as data URLs
 // (FR-005 multimodal preservation). Strict validation shared by every
@@ -1118,7 +1117,7 @@ type RespItem struct {
 	Summary   []struct {
 		Text string `json:"text"`
 	} `json:"summary,omitempty"`
-	Tools     []RespTool      `json:"tools,omitempty"`
+	Tools []RespTool `json:"tools,omitempty"`
 }
 
 // CCFunction is one Chat Completions tool function definition (decode and

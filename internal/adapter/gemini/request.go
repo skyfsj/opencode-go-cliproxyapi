@@ -209,7 +209,7 @@ func addFunctionDeclaration(req *geminiRequest, name, description string, schema
 		req.Tools = []tool{{}}
 	}
 	req.Tools[0].FunctionDeclarations = append(req.Tools[0].FunctionDeclarations, functionDeclaration{
-		Name: name, Description: description, Parameters: shared.ObjectSchema(schema),
+		Name: name, Description: description, Parameters: SanitizeJSONSchema(schema),
 	})
 }
 

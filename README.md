@@ -98,6 +98,10 @@ plugins:
         responses: true          # enables models routed to /v1/responses
         gemini: true             # enables models routed to gemini generateContent
 
+      # Client-facing name normalization: strip the `-contributor` marker
+      # from published model names (display only).
+      strip-contributor-suffix: false
+
       # Explicit route overrides per model (takes priority over built-in prefix routing)
       route-overrides:
         "custom-model":
@@ -138,6 +142,7 @@ plugins:
 | `protocols.gemini` | `bool` | `true` | Protocol switch for Gemini generateContent endpoints. |
 | `route-overrides` | `map` | `{}` | Map of model ID to `{ protocol: "...", endpoint: "..." }` overriding built-in family routing. Valid protocols: `chat-completions`, `messages`, `responses`, `gemini`. |
 | `model-mappings` | `map` | `{}` | Map of client-facing model ID to `{ to: <upstream-model-id> }` (or a bare scalar). The alias inherits the target's route; targets absent from the catalog register synthetic models with no capability metadata. Empty targets, self-mappings, and chained mappings are rejected at load. |
+| `strip-contributor-suffix` | `bool` | `false` | Strip the `-contributor` marker from client-facing model names (e.g. `gemini-4-argon-contributor` publishes as `gemini-4-argon`). Display only: upstream executions still send the full id. Collisions with existing models keep the un-stripped id and are warned. |
 | `request-timeout` | `duration` | `5m` | Upstream HTTP request timeout. Must be positive. |
 | `max-response-bytes` | `int64` | `67108864` (64 MiB) | Maximum non-streaming response body size in bytes. |
 | `allow-http` | `bool` | `false` | When `true`, permits `http://` scheme in `base-url` / `catalog-url` for local testing. |
@@ -166,3 +171,8 @@ go vet ./...
 - The Gemini wire carries no tool-call ids and no `[DONE]` sentinel: the
   adapter synthesizes ids (`<name>#<index>`) for client history round-trips
   and terminates client streams at upstream close.
+- Function tool schemas are sanitized: Gemini's function declarations
+  accept only an OpenAPI-subset of JSON Schema, so `$defs`/`$ref`, `anyOf`
+  /`oneOf`/`allOf` unions, and other unsupported keywords are inlined/
+  collapsed/described (with normalization notes in the schema description)
+  instead of being rejected upstream — coding-agent toolsets survive intact.

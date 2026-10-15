@@ -343,12 +343,22 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 		}
 		inputModes := firstNonEmpty(e.InputModes, e.InputModalities)
 		outputModes := firstNonEmpty(e.OutputModes, e.OutputModalities)
+		publicName := e.ID
+		if m.cfg.StripContributorSuffix {
+			// Client-facing name normalization (display only): strip the
+			// "-contributor" marker so externally documented names resolve;
+			// UpstreamID stays the full id and upstream executions keep it.
+			if stripped, had := strings.CutSuffix(publicName, "-contributor"); had && stripped != "" {
+				publicName = stripped
+				warns = append(warns, fmt.Sprintf("model %q published as %q (contributor suffix stripped)", e.ID, stripped))
+			}
+		}
 		display := e.DisplayName
 		if display == "" {
-			display = e.ID
+			display = publicName
 		}
 		rec := ModelRecord{
-			PublicID:     config.PublicID(m.cfg, e.ID),
+			PublicID:     config.PublicID(m.cfg, publicName),
 			UpstreamID:   upstreamID,
 			DisplayName:  display,
 			Protocol:     route,

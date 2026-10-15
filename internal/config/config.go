@@ -86,23 +86,28 @@ type Config struct {
 	AllowHTTP        bool
 	RequestTimeout   time.Duration
 	MaxResponseBytes int64
+	// StripContributorSuffix removes the "-contributor" marker from
+	// client-facing model names (display only; upstream executions keep
+	// the full upstream id).
+	StripContributorSuffix bool
 }
 
 // rawConfig mirrors the YAML shape; pointer fields distinguish "unset"
 // (apply default) from explicitly-set values including "" (validate as-is).
 // Unknown fields are ignored (host may pass extra keys).
 type rawConfig struct {
-	BaseURL          *string                  `yaml:"base-url"`
-	CatalogURL       *string                  `yaml:"catalog-url"`
-	ModelPrefix      rawPrefix                `yaml:"model-prefix"`
-	APIKeys          []rawKey                 `yaml:"api-keys"`
-	Catalog          rawCatalog               `yaml:"catalog"`
-	Protocols        rawProtocols             `yaml:"protocols"`
-	RouteOverrides   map[string]RouteOverride `yaml:"route-overrides"`
-	ModelMappings    map[string]ModelMapping  `yaml:"model-mappings"`
-	AllowHTTP        bool                     `yaml:"allow-http"`
-	RequestTimeout   *string                  `yaml:"request-timeout"`
-	MaxResponseBytes *int64                   `yaml:"max-response-bytes"`
+	BaseURL                *string                  `yaml:"base-url"`
+	CatalogURL             *string                  `yaml:"catalog-url"`
+	ModelPrefix            rawPrefix                `yaml:"model-prefix"`
+	APIKeys                []rawKey                 `yaml:"api-keys"`
+	Catalog                rawCatalog               `yaml:"catalog"`
+	Protocols              rawProtocols             `yaml:"protocols"`
+	RouteOverrides         map[string]RouteOverride `yaml:"route-overrides"`
+	ModelMappings          map[string]ModelMapping  `yaml:"model-mappings"`
+	AllowHTTP              bool                     `yaml:"allow-http"`
+	RequestTimeout         *string                  `yaml:"request-timeout"`
+	MaxResponseBytes       *int64                   `yaml:"max-response-bytes"`
+	StripContributorSuffix *bool                    `yaml:"strip-contributor-suffix"`
 }
 
 type rawPrefix struct {
@@ -179,6 +184,8 @@ func Load(yamlBytes []byte) (Config, error) {
 		AllowHTTP:        raw.AllowHTTP,
 		RequestTimeout:   requestTimeout,
 		MaxResponseBytes: orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
+
+		StripContributorSuffix: orDefault(raw.StripContributorSuffix, false),
 	}
 	if raw.CatalogURL != nil {
 		// Mirror the derived-default trim so an explicit trailing-slash

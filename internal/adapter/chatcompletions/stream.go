@@ -49,12 +49,12 @@ type StreamConverter struct {
 // argument fragments so the terminal response.completed output carries the
 // complete call (FR-006).
 type streamTool struct {
-	blockIndex int
-	id         string
-	name       string
-	args       strings.Builder
-	stopped    bool // content_block_stop emitted
-	customEmitted int // custom_tool_call_input bytes already emitted as deltas
+	blockIndex    int
+	id            string
+	name          string
+	args          strings.Builder
+	stopped       bool // content_block_stop emitted
+	customEmitted int  // custom_tool_call_input bytes already emitted as deltas
 }
 
 // NewStreamConverter returns a converter translating Chat Completions
